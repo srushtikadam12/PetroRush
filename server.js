@@ -21,6 +21,7 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/petrorush
 // ============================================
 const userSchema = new mongoose.Schema({
   phone: { type: String, required: true, unique: true },
+  email: { type: String },
   name: { type: String },
   aadhaar: { type: String },
   vehicleNumber: { type: String },
@@ -54,13 +55,9 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// Test email connection
 transporter.verify((error, success) => {
-  if (error) {
-    console.log('❌ Email error:', error.message);
-  } else {
-    console.log('✅ Email service ready');
-  }
+  if (error) console.log('❌ Email error:', error.message);
+  else console.log('✅ Email service ready');
 });
 
 // ============================================
@@ -71,22 +68,30 @@ function generateOTP() {
 }
 
 // ============================================
-// SEND OTP EMAIL (since we don't have Twilio)
-// We simulate SMS by sending OTP to owner email
+// SEND OTP TO USER'S OWN EMAIL
 // ============================================
-async function sendOTPEmail(phone, otp) {
+async function sendOTPToUser(userEmail, phone, otp) {
   const mailOptions = {
-    from: process.env.GMAIL_USER,
-    to: process.env.CONTACT_EMAIL,
-    subject: `PetroRush OTP for ${phone}`,
+    from: `"PetroRush" <${process.env.GMAIL_USER}>`,
+    to: userEmail,
+    subject: `Your PetroRush OTP: ${otp}`,
     html: `
-      <div style="font-family:Arial,sans-serif;max-width:400px;margin:0 auto;padding:20px;background:#f9f9f9;border-radius:10px;">
-        <h2 style="color:#FF6B00;">PetroRush OTP</h2>
-        <p>OTP requested for phone: <strong>+91 ${phone}</strong></p>
-        <div style="background:#000;color:#FF6B00;font-size:32px;font-weight:900;text-align:center;padding:20px;border-radius:8px;letter-spacing:8px;">
-          ${otp}
+      <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:0;background:#f5f5f5;">
+        <div style="background:#000;padding:28px 32px;text-align:center;">
+          <h1 style="color:#FF6B00;margin:0;font-size:28px;letter-spacing:3px;">PETRORUSH</h1>
+          <p style="color:#888;margin:6px 0 0;font-size:13px;">Fuel delivered to your location</p>
         </div>
-        <p style="color:#888;font-size:12px;margin-top:16px;">This OTP expires in 5 minutes.</p>
+        <div style="background:#fff;padding:32px;border-radius:0 0 12px 12px;">
+          <h2 style="color:#111;font-size:20px;margin:0 0 8px;">Your OTP Code</h2>
+          <p style="color:#888;font-size:14px;margin:0 0 24px;">Use this code to verify your phone number <strong>+91 ${phone}</strong></p>
+          <div style="background:#000;border-radius:12px;padding:24px;text-align:center;margin:0 0 24px;">
+            <div style="font-size:42px;font-weight:900;letter-spacing:12px;color:#FF6B00;">${otp}</div>
+          </div>
+          <p style="color:#e53935;font-size:13px;margin:0 0 8px;">⏱ This OTP expires in <strong>5 minutes</strong></p>
+          <p style="color:#888;font-size:12px;margin:0;">If you did not request this OTP, please ignore this email.</p>
+          <hr style="border:none;border-top:1px solid #eee;margin:24px 0;"/>
+          <p style="color:#aaa;font-size:11px;text-align:center;margin:0;">© 2024 PetroRush · Fuel at your doorstep</p>
+        </div>
       </div>
     `
   };
@@ -102,28 +107,32 @@ app.get('/', (req, res) => {
   res.json({ status: 'PetroRush backend running ✅' });
 });
 
-// SEND OTP
+// SEND OTP — sends to user's own email
 app.post('/api/send-otp', async (req, res) => {
   try {
-    const { phone } = req.body;
+    const { phone, email } = req.body;
     if (!phone || phone.length !== 10) {
       return res.status(400).json({ success: false, message: 'Invalid phone number' });
     }
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ success: false, message: 'Valid email is required to receive OTP' });
+    }
+
     const otp = generateOTP();
-    const otpExpiry = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+    const otpExpiry = new Date(Date.now() + 5 * 60 * 1000);
 
     // Save OTP to database
     await User.findOneAndUpdate(
       { phone },
-      { otp, otpExpiry },
+      { otp, otpExpiry, email },
       { upsert: true, new: true }
     );
 
-    // Send OTP email to owner (for demo)
-    await sendOTPEmail(phone, otp);
+    // Send OTP to USER'S OWN EMAIL
+    await sendOTPToUser(email, phone, otp);
 
-    console.log(`📱 OTP ${otp} sent for phone ${phone}`);
-    res.json({ success: true, message: 'OTP sent successfully' });
+    console.log(`📱 OTP sent to ${email} for phone ${phone}`);
+    res.json({ success: true, message: `OTP sent to ${email}` });
   } catch (err) {
     console.error('Send OTP error:', err);
     res.status(500).json({ success: false, message: 'Failed to send OTP' });
@@ -140,7 +149,7 @@ app.post('/api/verify-otp', async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found. Please sign up first.' });
     }
     if (user.otp !== otp) {
-      return res.status(400).json({ success: false, message: 'Invalid OTP' });
+      return res.status(400).json({ success: false, message: 'Invalid OTP. Please try again.' });
     }
     if (new Date() > user.otpExpiry) {
       return res.status(400).json({ success: false, message: 'OTP expired. Please request a new one.' });
@@ -164,6 +173,7 @@ app.post('/api/verify-otp', async (req, res) => {
       token,
       user: {
         phone: user.phone,
+        email: user.email,
         name: user.name,
         vehicleNumber: user.vehicleNumber,
         vehicleType: user.vehicleType
@@ -175,19 +185,18 @@ app.post('/api/verify-otp', async (req, res) => {
   }
 });
 
-// SIGNUP — SAVE USER DETAILS
+// SIGNUP
 app.post('/api/signup', async (req, res) => {
   try {
-    const { phone, name, aadhaar, vehicleNumber, vehicleType } = req.body;
+    const { phone, email, name, aadhaar, vehicleNumber, vehicleType } = req.body;
 
-    if (!phone || !name || !aadhaar || !vehicleNumber || !vehicleType) {
+    if (!phone || !email || !name || !aadhaar || !vehicleNumber || !vehicleType) {
       return res.status(400).json({ success: false, message: 'All fields are required' });
     }
 
-    // Update user with full details
     const user = await User.findOneAndUpdate(
       { phone },
-      { name, aadhaar, vehicleNumber, vehicleType, otp: null, otpExpiry: null },
+      { name, email, aadhaar, vehicleNumber, vehicleType, otp: null, otpExpiry: null },
       { upsert: true, new: true }
     );
 
@@ -198,24 +207,43 @@ app.post('/api/signup', async (req, res) => {
       { expiresIn: '7d' }
     );
 
-    // Send welcome email to owner
+    // Send welcome email to USER
     const welcomeMail = {
-      from: process.env.GMAIL_USER,
-      to: process.env.CONTACT_EMAIL,
-      subject: '🎉 New PetroRush User Signup!',
+      from: `"PetroRush" <${process.env.GMAIL_USER}>`,
+      to: email,
+      subject: '🎉 Welcome to PetroRush!',
       html: `
-        <div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;background:#f9f9f9;border-radius:12px;">
-          <h2 style="color:#FF6B00;">New User Signup! 🚀</h2>
-          <table style="width:100%;border-collapse:collapse;">
-            <tr><td style="padding:8px;color:#888;">Name</td><td style="padding:8px;font-weight:bold;">${name}</td></tr>
-            <tr style="background:#fff;"><td style="padding:8px;color:#888;">Phone</td><td style="padding:8px;font-weight:bold;">+91 ${phone}</td></tr>
-            <tr><td style="padding:8px;color:#888;">Vehicle</td><td style="padding:8px;font-weight:bold;">${vehicleNumber} (${vehicleType})</td></tr>
-            <tr style="background:#fff;"><td style="padding:8px;color:#888;">Signed up</td><td style="padding:8px;font-weight:bold;">${new Date().toLocaleString('en-IN')}</td></tr>
-          </table>
+        <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;background:#f5f5f5;">
+          <div style="background:#000;padding:28px 32px;text-align:center;">
+            <h1 style="color:#FF6B00;margin:0;font-size:28px;letter-spacing:3px;">PETRORUSH</h1>
+            <p style="color:#888;margin:6px 0 0;font-size:13px;">Fuel delivered to your location</p>
+          </div>
+          <div style="background:#fff;padding:32px;border-radius:0 0 12px 12px;">
+            <h2 style="color:#111;">Welcome, ${name}! 🎉</h2>
+            <p style="color:#888;font-size:14px;">Your PetroRush account has been created successfully.</p>
+            <div style="background:#f9f9f9;border-radius:10px;padding:20px;margin:20px 0;">
+              <table style="width:100%;border-collapse:collapse;">
+                <tr><td style="padding:8px;color:#888;font-size:13px;">Phone</td><td style="padding:8px;font-weight:bold;font-size:13px;">+91 ${phone}</td></tr>
+                <tr style="background:#fff;"><td style="padding:8px;color:#888;font-size:13px;">Vehicle</td><td style="padding:8px;font-weight:bold;font-size:13px;">${vehicleNumber} (${vehicleType})</td></tr>
+              </table>
+            </div>
+            <p style="color:#888;font-size:13px;">You can now order fuel anytime, anywhere. Just tap <strong>Order Fuel Now</strong>!</p>
+            <hr style="border:none;border-top:1px solid #eee;margin:24px 0;"/>
+            <p style="color:#aaa;font-size:11px;text-align:center;">© 2024 PetroRush · Fuel at your doorstep</p>
+          </div>
         </div>
       `
     };
     await transporter.sendMail(welcomeMail);
+
+    // Also notify owner
+    const ownerMail = {
+      from: `"PetroRush" <${process.env.GMAIL_USER}>`,
+      to: process.env.CONTACT_EMAIL,
+      subject: `🚀 New signup: ${name}`,
+      html: `<p>New user: <b>${name}</b> | Phone: <b>+91 ${phone}</b> | Vehicle: <b>${vehicleNumber}</b> | Time: ${new Date().toLocaleString('en-IN')}</p>`
+    };
+    await transporter.sendMail(ownerMail);
 
     res.json({ success: true, message: 'Account created successfully', token });
   } catch (err) {
@@ -224,30 +252,26 @@ app.post('/api/signup', async (req, res) => {
   }
 });
 
-// CONTACT FORM
+// CONTACT FORM — goes to owner email
 app.post('/api/contact', async (req, res) => {
   try {
     const { name, phone, email, message } = req.body;
-
     if (!name || !phone || !email || !message) {
       return res.status(400).json({ success: false, message: 'All fields are required' });
     }
-
-    // Save to database
     await Contact.create({ name, phone, email, message });
 
-    // Send email to owner
     const mailOptions = {
-      from: process.env.GMAIL_USER,
+      from: `"PetroRush Contact" <${process.env.GMAIL_USER}>`,
       to: process.env.CONTACT_EMAIL,
-      subject: `📬 New Contact Message from ${name} — PetroRush`,
+      subject: `📬 New message from ${name}`,
       html: `
-        <div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;background:#f9f9f9;border-radius:12px;">
+        <div style="font-family:Arial,sans-serif;max-width:480px;padding:24px;background:#f9f9f9;border-radius:12px;">
           <h2 style="color:#FF6B00;">New Contact Message 📬</h2>
           <table style="width:100%;border-collapse:collapse;">
-            <tr><td style="padding:10px;color:#888;width:120px;">Name</td><td style="padding:10px;font-weight:bold;">${name}</td></tr>
+            <tr><td style="padding:10px;color:#888;">Name</td><td style="padding:10px;font-weight:bold;">${name}</td></tr>
             <tr style="background:#fff;"><td style="padding:10px;color:#888;">Phone</td><td style="padding:10px;font-weight:bold;">${phone}</td></tr>
-            <tr><td style="padding:10px;color:#888;">Email</td><td style="padding:10px;font-weight:bold;"><a href="mailto:${email}">${email}</a></td></tr>
+            <tr><td style="padding:10px;color:#888;">Email</td><td style="padding:10px;"><a href="mailto:${email}">${email}</a></td></tr>
             <tr style="background:#fff;"><td style="padding:10px;color:#888;">Message</td><td style="padding:10px;">${message}</td></tr>
             <tr><td style="padding:10px;color:#888;">Time</td><td style="padding:10px;">${new Date().toLocaleString('en-IN')}</td></tr>
           </table>
@@ -256,21 +280,10 @@ app.post('/api/contact', async (req, res) => {
       `
     };
     await transporter.sendMail(mailOptions);
-
     res.json({ success: true, message: 'Message sent successfully' });
   } catch (err) {
     console.error('Contact error:', err);
     res.status(500).json({ success: false, message: 'Failed to send message' });
-  }
-});
-
-// PROTECTED ROUTE EXAMPLE
-app.get('/api/profile', authenticateToken, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.userId).select('-otp -otpExpiry');
-    res.json({ success: true, user });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Failed to get profile' });
   }
 });
 
@@ -288,9 +301,19 @@ function authenticateToken(req, res, next) {
   }
 }
 
-// START SERVER
+// PROFILE
+app.get('/api/profile', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).select('-otp -otpExpiry');
+    res.json({ success: true, user });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get profile' });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 PetroRush backend running on http://localhost:${PORT}`);
-  console.log(`📧 Emails will be sent to: ${process.env.CONTACT_EMAIL}`);
+  console.log(`📧 OTP will be sent to each user's own email`);
+  console.log(`📬 Contact emails go to: ${process.env.CONTACT_EMAIL}`);
 });
