@@ -2,20 +2,25 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
 const mongoose = require('mongoose');
-
+const { Resend } = require('resend');
+ 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
+ 
+// ============================================
+// RESEND EMAIL
+// ============================================
+const resend = new Resend(process.env.RESEND_API_KEY);
+ 
 // ============================================
 // MONGODB CONNECTION
 // ============================================
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/petrorush')
   .then(() => console.log('✅ MongoDB connected'))
   .catch(err => console.log('❌ MongoDB error:', err.message));
-
+ 
 // ============================================
 // USER MODEL
 // ============================================
@@ -31,7 +36,7 @@ const userSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', userSchema);
-
+ 
 // ============================================
 // CONTACT MESSAGE MODEL
 // ============================================
@@ -43,41 +48,20 @@ const contactSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 const Contact = mongoose.model('Contact', contactSchema);
-
-// ============================================
-// EMAIL TRANSPORTER
-// ============================================
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_PASS
-  },
-  tls: {
-    rejectUnauthorized: false
-  }
-});
-
-transporter.verify((error, success) => {
-  if (error) console.log('❌ Email error:', error.message);
-  else console.log('✅ Email service ready');
-});
-
+ 
 // ============================================
 // GENERATE OTP
 // ============================================
 function generateOTP() {
   return Math.floor(1000 + Math.random() * 9000).toString();
 }
-
+ 
 // ============================================
 // SEND OTP TO USER'S OWN EMAIL
 // ============================================
 async function sendOTPToUser(userEmail, phone, otp) {
-  const mailOptions = {
-    from: `"PetroRush" <${process.env.GMAIL_USER}>`,
+  await resend.emails.send({
+    from: 'PetroRush <onboarding@resend.dev>',
     to: userEmail,
     subject: `Your PetroRush OTP: ${otp}`,
     html: `
@@ -99,20 +83,19 @@ async function sendOTPToUser(userEmail, phone, otp) {
         </div>
       </div>
     `
-  };
-  await transporter.sendMail(mailOptions);
+  });
 }
-
+ 
 // ============================================
 // ROUTES
 // ============================================
-
+ 
 // Health check
 app.get('/', (req, res) => {
   res.json({ status: 'PetroRush backend running ✅' });
 });
-
-// SEND OTP — sends to user's own email
+ 
+// SEND OTP
 app.post('/api/send-otp', async (req, res) => {
   try {
     const { phone, email } = req.body;
@@ -122,34 +105,32 @@ app.post('/api/send-otp', async (req, res) => {
     if (!email || !email.includes('@')) {
       return res.status(400).json({ success: false, message: 'Valid email is required to receive OTP' });
     }
-
+ 
     const otp = generateOTP();
     const otpExpiry = new Date(Date.now() + 5 * 60 * 1000);
-
-    // Save OTP to database
+ 
     await User.findOneAndUpdate(
       { phone },
       { otp, otpExpiry, email },
       { upsert: true, new: true }
     );
-
-    // Send OTP to USER'S OWN EMAIL
+ 
     await sendOTPToUser(email, phone, otp);
-
-    console.log(`📱 OTP sent to ${email} for phone ${phone}`);
+ 
+    console.log(`📱 OTP ${otp} sent to ${email} for phone ${phone}`);
     res.json({ success: true, message: `OTP sent to ${email}` });
   } catch (err) {
     console.error('Send OTP error:', err);
     res.status(500).json({ success: false, message: 'Failed to send OTP' });
   }
 });
-
+ 
 // VERIFY OTP + LOGIN
 app.post('/api/verify-otp', async (req, res) => {
   try {
     const { phone, otp } = req.body;
     const user = await User.findOne({ phone });
-
+ 
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found. Please sign up first.' });
     }
@@ -159,19 +140,17 @@ app.post('/api/verify-otp', async (req, res) => {
     if (new Date() > user.otpExpiry) {
       return res.status(400).json({ success: false, message: 'OTP expired. Please request a new one.' });
     }
-
-    // Clear OTP
+ 
     user.otp = null;
     user.otpExpiry = null;
     await user.save();
-
-    // Generate JWT token
+ 
     const token = jwt.sign(
       { userId: user._id, phone: user.phone },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
-
+ 
     res.json({
       success: true,
       message: 'Login successful',
@@ -189,32 +168,31 @@ app.post('/api/verify-otp', async (req, res) => {
     res.status(500).json({ success: false, message: 'Verification failed' });
   }
 });
-
+ 
 // SIGNUP
 app.post('/api/signup', async (req, res) => {
   try {
     const { phone, email, name, aadhaar, vehicleNumber, vehicleType } = req.body;
-
+ 
     if (!phone || !email || !name || !aadhaar || !vehicleNumber || !vehicleType) {
       return res.status(400).json({ success: false, message: 'All fields are required' });
     }
-
+ 
     const user = await User.findOneAndUpdate(
       { phone },
       { name, email, aadhaar, vehicleNumber, vehicleType, otp: null, otpExpiry: null },
       { upsert: true, new: true }
     );
-
-    // Generate JWT token
+ 
     const token = jwt.sign(
       { userId: user._id, phone: user.phone },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
-
-    // Send welcome email to USER
-    const welcomeMail = {
-      from: `"PetroRush" <${process.env.GMAIL_USER}>`,
+ 
+    // Welcome email to user
+    await resend.emails.send({
+      from: 'PetroRush <onboarding@resend.dev>',
       to: email,
       subject: '🎉 Welcome to PetroRush!',
       html: `
@@ -238,26 +216,24 @@ app.post('/api/signup', async (req, res) => {
           </div>
         </div>
       `
-    };
-    await transporter.sendMail(welcomeMail);
-
-    // Also notify owner
-    const ownerMail = {
-      from: `"PetroRush" <${process.env.GMAIL_USER}>`,
+    });
+ 
+    // Notify owner
+    await resend.emails.send({
+      from: 'PetroRush <onboarding@resend.dev>',
       to: process.env.CONTACT_EMAIL,
-      subject: `🚀 New signup: ${name}`,
-      html: `<p>New user: <b>${name}</b> | Phone: <b>+91 ${phone}</b> | Vehicle: <b>${vehicleNumber}</b> | Time: ${new Date().toLocaleString('en-IN')}</p>`
-    };
-    await transporter.sendMail(ownerMail);
-
+      subject: `🚀 New PetroRush signup: ${name}`,
+      html: `<p>New user: <b>${name}</b> | Phone: <b>+91 ${phone}</b> | Email: <b>${email}</b> | Vehicle: <b>${vehicleNumber}</b> | Time: ${new Date().toLocaleString('en-IN')}</p>`
+    });
+ 
     res.json({ success: true, message: 'Account created successfully', token });
   } catch (err) {
     console.error('Signup error:', err);
     res.status(500).json({ success: false, message: 'Signup failed' });
   }
 });
-
-// CONTACT FORM — goes to owner email
+ 
+// CONTACT FORM
 app.post('/api/contact', async (req, res) => {
   try {
     const { name, phone, email, message } = req.body;
@@ -265,11 +241,11 @@ app.post('/api/contact', async (req, res) => {
       return res.status(400).json({ success: false, message: 'All fields are required' });
     }
     await Contact.create({ name, phone, email, message });
-
-    const mailOptions = {
-      from: `"PetroRush Contact" <${process.env.GMAIL_USER}>`,
+ 
+    await resend.emails.send({
+      from: 'PetroRush <onboarding@resend.dev>',
       to: process.env.CONTACT_EMAIL,
-      subject: `📬 New message from ${name}`,
+      subject: `📬 New message from ${name} — PetroRush`,
       html: `
         <div style="font-family:Arial,sans-serif;max-width:480px;padding:24px;background:#f9f9f9;border-radius:12px;">
           <h2 style="color:#FF6B00;">New Contact Message 📬</h2>
@@ -283,15 +259,15 @@ app.post('/api/contact', async (req, res) => {
           <a href="mailto:${email}" style="display:inline-block;margin-top:16px;background:#FF6B00;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;">Reply to ${name}</a>
         </div>
       `
-    };
-    await transporter.sendMail(mailOptions);
+    });
+ 
     res.json({ success: true, message: 'Message sent successfully' });
   } catch (err) {
     console.error('Contact error:', err);
     res.status(500).json({ success: false, message: 'Failed to send message' });
   }
 });
-
+ 
 // JWT MIDDLEWARE
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -305,7 +281,7 @@ function authenticateToken(req, res, next) {
     res.status(403).json({ success: false, message: 'Invalid token' });
   }
 }
-
+ 
 // PROFILE
 app.get('/api/profile', authenticateToken, async (req, res) => {
   try {
@@ -315,10 +291,11 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to get profile' });
   }
 });
-
+ 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 PetroRush backend running on http://localhost:${PORT}`);
-  console.log(`📧 OTP will be sent to each user's own email`);
+  console.log(`📧 Using Resend for emails`);
   console.log(`📬 Contact emails go to: ${process.env.CONTACT_EMAIL}`);
 });
+ 
